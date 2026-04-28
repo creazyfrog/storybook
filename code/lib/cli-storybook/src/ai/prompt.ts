@@ -1,6 +1,7 @@
+import { SupportedRenderer } from 'storybook/internal/types';
 import { dedent } from 'ts-dedent';
 
-import type { ProjectInfo, AiPrompt } from './types.ts';
+import type { AiPrompt, ProjectInfo } from './types.ts';
 
 /**
  * Builds a markdown-format docs URL with renderer and language query parameters.
@@ -21,433 +22,303 @@ export function getDocsMarkdownUrl(
   return `https://storybook.js.org/docs${versionSegment}/${path}.md${query ? `?${query}` : ''}`;
 }
 
-export function getPrompts(projectInfo: ProjectInfo): {
-  prompts: AiPrompt[];
-} {
-  const aiPrompts: AiPrompt[] = [];
+const DEFAULT_PROJECT_INFO: ProjectInfo = {
+  storybookVersion: undefined,
+  majorVersion: undefined,
+  framework: null,
+  rendererPackage: null,
+  renderer: SupportedRenderer.REACT,
+  builderPackage: null,
+  addons: [],
+  configDir: '.storybook',
+  storiesPaths: [],
+  language: 'ts',
+};
 
-  aiPrompts.push({
-    name: 'setup',
-    description: 'Set up Storybook for success',
-    instructions: getSetupInstructions(projectInfo),
-  });
-
-  return { prompts: aiPrompts };
+function withDefaults(projectInfo?: ProjectInfo): ProjectInfo {
+  return projectInfo ?? DEFAULT_PROJECT_INFO;
 }
 
-function getTypeImportSource(projectInfo: ProjectInfo): string {
-  return projectInfo.framework || projectInfo.rendererPackage || '@storybook/react';
+export function getPrompts(projectInfo?: ProjectInfo): {
+  prompts: AiPrompt[];
+} {
+  return {
+    prompts: [
+      {
+        name: 'setup',
+        description: 'Set up Storybook for success',
+        instructions: getSetupInstructions(withDefaults(projectInfo)),
+      },
+    ],
+  };
+}
+
+function ext(language: 'ts' | 'js', jsx: boolean): string {
+  if (language === 'ts') {
+    return jsx ? 'tsx' : 'ts';
+  }
+  return jsx ? 'jsx' : 'js';
+}
+
+function installCommand(packageManager: string | undefined, deps: string, dev = false): string {
+  switch (packageManager) {
+    case 'yarn':
+    case 'yarn1':
+    case 'yarn2':
+      return `yarn add ${dev ? '--dev ' : ''}${deps}`;
+    case 'pnpm':
+      return `pnpm add ${dev ? '-D ' : ''}${deps}`;
+    case 'bun':
+      return `bun add ${dev ? '-d ' : ''}${deps}`;
+    case 'npm':
+      return `npm install ${dev ? '--save-dev ' : ''}${deps}`;
+    default:
+      return `<your-package-manager> add ${dev ? '-D ' : ''}${deps}`;
+  }
+}
+
+function packageManagerRule(packageManager: string | undefined): string {
+  if (packageManager) {
+    return `**Use \`${packageManager}\` for every install** (detected from this project's lockfile).`;
+  }
+  return '**Detect the package manager once** from the lockfile (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, `bun.lockb` → bun, otherwise npm) and use it for every install in this trial.';
 }
 
 function getSetupInstructions(projectInfo: ProjectInfo): string {
-  const configDir = projectInfo.configDir;
-  const typeImport = getTypeImportSource(projectInfo);
+  const { configDir, language, packageManager } = projectInfo;
+  const tsx = ext(language, true);
+  const ts = ext(language, false);
+  const docsUrl = (path: string) => getDocsMarkdownUrl(path, projectInfo);
+
+  const mswInstall = installCommand(packageManager, 'msw msw-storybook-addon mockdate', true);
 
   return dedent`
-    Attention: The following instructions must be followed in order to successfully set up Storybook in this project. Do not skip steps or attempt to do them out of order.
+    Your goal is to make Storybook fully functional in this project: configure \`${configDir}/preview.${tsx}\` with the right decorators, add MSW for data, and write up to 10 colocated \`*.stories.${tsx}\` files. Add \`play\` functions only where they prove something non-trivial.
 
-    Your goal is to make Storybook fully functional in this project by analyzing the codebase,
-    configuring the preview with the right decorators, and writing stories for some components.
+    ## Rules of engagement (follow strictly — these are time budgets, not suggestions)
 
-    After each created story, run Vitest to verify it renders.
-    If the test fails, read the error, fix the issue, and re-run until it passes before moving on.
+    1. **Discover with Glob/Grep/Read, not shell.** Never use \`ls\`, \`find\`, \`cat\`, \`head\`, \`tail\`, shell \`grep\`, \`sed\`, or \`node -e\` for discovery or for editing files in bulk — these are slower per call and violate caching. Concrete substitutions, no exceptions:
+        - List a directory → \`Glob('src/components/*')\`, not \`ls src/components\`.
+        - Search a string → \`Grep('pattern', { path: 'src' })\`, not \`grep -rn ...\` or \`find ... | xargs grep\`.
+        - Read a file → \`Read('path/to/file')\`, not \`cat\`/\`head\`/\`tail\`.
+        - Bulk-edit many files → multiple \`Edit\` calls (or \`Edit\` with \`replace_all\`), not \`sed -i\`.
+    2. **Never read or grep inside \`node_modules\`.** The imports shown in this prompt are correct — don't verify them by introspecting installed packages. If something seems off, re-read this prompt, not \`node_modules\`.
+    3. **Read budget: ~12 files for discovery.** Before writing any code you may Read at most ~12 files (\`index.html\`, entry, App, providers, routing, root CSS, 2–3 representative pages/components, 1–2 hooks, 1 test). If you need more, summarize and move on.
+    4. **Edit > Write.** For any file you've Read, use \`Edit\`. Use \`Write\` only for new files. The project already has a \`${configDir}/preview.${tsx}\` from \`storybook init\` — **Edit** it, do not overwrite.
+    5. **Batch the test loop.** Write **all** stories first, then run vitest **once** across everything. No per-file vitest runs until after that first batch run reveals failures.
+    6. ${packageManagerRule(packageManager)}
+    7. **Prefer fixing the shared \`${configDir}/preview.${tsx}\`** over story-local workarounds when multiple stories fail the same way.
+    8. **Stop when the success criteria are met** — don't keep polishing.
 
-    - Copy real patterns from the codebase
-    - Keep the app code unchanged
-    - Put the default setup in \`${configDir}/preview.tsx\`
-    - Keep app mocking and runtime setup in \`${configDir}/preview.tsx\`, not in the stories
+    ## Plan (do not skip steps, but keep each step lean)
 
-    ${getDocsReferenceSection(projectInfo)}
+    ### Step 1 — Discover the runtime (≤12 reads)
 
-    ### Step 1: Analyze the codebase
+    Identify, in this order, using Glob/Grep first then targeted Reads:
 
-    Read enough of the app to understand the full runtime environment before writing any stories.
+    - \`index.html\` — \`<link rel="stylesheet">\` tags, inline \`<style>\` blocks, fonts, and any \`<div id="...">\` mount or portal roots that aren't created by JS
+    - entry file (\`main.${tsx}\` / \`index.${tsx}\`) — providers wrapping \`<App />\`, root CSS imports
+    - \`App.${tsx}\` — top-level layout, router usage, providers it consumes
+    - providers / context files — what they expose
+    - root CSS — global styles, CSS variables, theme tokens (both JS-imported CSS **and** anything linked from \`index.html\`)
+    - data hooks — \`fetch(...)\`, \`useQuery\`, \`axios\`, etc. (capture base URL + endpoints actually called during render)
+    - browser state actually read at render — \`localStorage\`/\`sessionStorage\`/cookie keys
+    - portal targets — \`createPortal(...)\` and the DOM ids it mounts to (e.g. \`#modal-root\`)
+    - 1–2 real page or feature components (your story source-of-truth for JSX patterns)
 
-    Do not stop at \`main.tsx\` or \`App.tsx\`.
-    Follow imports into providers, pages, hooks, and shared components until you know:
+    Stop reading once you can answer: *"What providers, CSS, browser state, and network calls must the preview supply for a typical page to render?"*
 
-    - which providers exist
-    - which CSS files are injected
-    - which queries fetch data
-    - which browser-state reads happen
-    - which portals and portal roots exist
-    - which pages and components show the real usage patterns
+    ### Step 2 — Build the shared preview
 
-    Example of what to copy:
+    Set up Storybook **once** so most stories work without per-story setup. **Edit the existing \`${configDir}/preview.${tsx}\`** (created by \`storybook init\`) — add to its existing config object, don't replace it.
 
-    \`\`\`tsx
-    // src/main.tsx
-    import "./index.css";
-    import App from "./App";
-    import { SessionProvider } from "./contexts/SessionContext";
+    The complete shape should look like this (merge the new pieces into what's already there):
 
-    createRoot(document.getElementById("root")!).render(
-      <SessionProvider>
-        <App />
-      </SessionProvider>,
-    );
+    ${getPreviewExample(projectInfo)}
+
+    Rules for the preview:
+
+    - Use the **real** provider tree and the **real** root CSS import. Don't invent providers.
+    - If the app's CSS is loaded via \`<link>\` in \`index.html\` (rather than imported in JS), import the same file from preview so stories render with the same styles.
+    - Seed only the specific browser-state keys the app actually reads. Do **not** clear all of \`localStorage\`/\`sessionStorage\`/cookies, and do not reset Storybook's own state.
+    - Use \`mockdate\` only when render output depends on the date.
+    - Do not mock \`window\`, \`document\`, \`navigator\`, observers, or \`fetch\` directly.
+
+    ### Step 3 — Portals (in a decorator, not preview-body.html)
+
+    If you found \`createPortal(..., document.getElementById('foo'))\` in Step 1, **add a decorator in \`${configDir}/preview.${tsx}\` that creates the portal root** before the story renders. Do not use \`preview-body.html\`.
+
+    ${getPortalDecoratorExample(projectInfo)}
+
+    Add this decorator to the \`decorators\` array of your preview config. Skip this step entirely if portals only target \`document.body\`.
+
+    ### Step 4 — MSW handlers (only what stories will hit)
+
+    Use \`msw-storybook-addon\`. Install with:
+
+    \`\`\`bash
+    ${mswInstall}
+    npx msw init ./public --save
     \`\`\`
 
-    That means Storybook should copy:
+    Make sure \`${configDir}/main.${ts}\` serves \`./public\`:
 
-    - the \`index.css\` import
-    - the \`SessionProvider\`
-    - the same provider order
+    ${getMainConfigExample(projectInfo)}
 
-    Example of tracing the app deeper:
+    Put handlers in \`${configDir}/msw-handlers.${ts}\`. Cover only the endpoints your stories will exercise — no catch-alls.
 
-    \`\`\`tsx
-    // src/App.tsx
-    function App() {
-      const { products, loadMoreProducts } = useProducts();
-      const { currentUser, signOut } = useSession();
-      // ...
-    }
-    \`\`\`
-
-    \`\`\`ts
-    // src/hooks/useProducts.ts
-    const response = await fetch(apiBaseUrl + "/products?page=1");
-    \`\`\`
-
-    \`\`\`ts
-    // src/hooks/useTheme.ts
-    const savedTheme = localStorage.getItem("theme");
-    \`\`\`
-
-    That means the default Storybook setup should discover and prepare:
-
-    - provider state
-    - MSW handlers for queries
-    - browser-state values that are actually read during render
-
-    ### Step 2: Build one default app environment in preview
-
-    Set up Storybook once so most stories work without story-specific setup.
-
-    Start with the smallest faithful environment:
-
-    - the real provider tree
-    - the real root CSS
-    - seeded browser state if the app reads it during render
-    - MSW for network/data queries
-
-    It is fine to seed browser state such as \`localStorage\`, \`sessionStorage\`, and cookies when the app reads them during render.
-    Seed only the specific app-owned keys and values you need.
-    Do not clear all \`localStorage\`, \`sessionStorage\`, or cookies, and do not reset Storybook's own state.
-    Do not mock or redefine the browser runtime itself.
-    The stories run in Vitest browser mode, so the real browser environment should already exist.
-
-    ${getPreviewConfigExample(projectInfo)}
-
-    Use this same idea for:
-
-    - providers
-    - root CSS
-    - browser state
-    - dates, and if the app logic depends on them during render then always use \`mockdate\`
-
-    Example with the \`mockdate\` package:
-
-    ${getMockDateExample(projectInfo)}
-
-    ### Step 3: Support portals with preview-body.html
-
-    If the app uses portals, copy that setup into Storybook too.
-
-    Look for patterns like:
-
-    - \`createPortal(...)\`
-    - modal, dialog, drawer, popover, tooltip, toast, or dropdown portal components
-    - hard-coded roots such as \`#portal-root\`, \`#modal-root\`, \`#drawer-root\`, or \`#toast-root\`
-
-    Example of what to copy:
-
-    \`\`\`tsx
-    // real component
-    return createPortal(<ModalContent />, document.getElementById("portal-root")!);
-    \`\`\`
-
-    That means Storybook should create the same portal root in \`${configDir}/preview-body.html\`:
-
-    \`\`\`html
-    <!-- ${configDir}/preview-body.html -->
-    <div id="portal-root"></div>
-    \`\`\`
-
-    If the app uses multiple portal roots, create all of them there:
-
-    \`\`\`html
-    <!-- ${configDir}/preview-body.html -->
-    <div id="modal-root"></div>
-    <div id="drawer-root"></div>
-    <div id="toast-root"></div>
-    \`\`\`
-
-    If a library portals directly to \`document.body\`, do not add extra roots for it.
-    Make sure the copied page shell, CSS, and layout still allow overlays, fixed positioning, and z-index stacking to render correctly.
-
-    ### Step 4: Mock side effects globally
-
-    All network/data queries should be handled by the default Storybook environment.
-
-    - Always use \`msw-storybook-addon\` for query mocking.
-    - If you introduce MSW, run \`npx msw init ./public --save\` to create the worker file.
-    - Make sure Storybook serves \`./public\` as a static dir so \`mockServiceWorker.js\` is available.
-    - Do not mock \`fetch\` directly.
-    - Network/data queries should return deterministic mock data.
-    - If you need to change dependencies, first check the lockfile and use that package manager for the change.
-
-    Example of copying a real fetch pattern into shared handlers:
-
-    \`\`\`ts
-    // real app hook
-    const response = await fetch(
-      apiBaseUrl +
-        "/products?" +
-        new URLSearchParams({
-          page: "1",
-          sort: "featured",
-        }),
-    );
-    \`\`\`
-
-    \`\`\`ts
-    // ${configDir}/msw-handlers.ts
-    import { http, HttpResponse } from "msw";
+    \`\`\`${ts}
+    // ${configDir}/msw-handlers.${ts}
+    import { http, HttpResponse } from 'msw';
 
     export const mswHandlers = {
       products: [
-        http.get("https://api.example.com/products", () =>
-          HttpResponse.json({
-            items: [
-              {
-                id: "product-1",
-                name: "Example product",
-                description: "Mock product description",
-                imageUrl: "https://images.example.com/product.jpg",
-                price: 42,
-              },
-            ],
-          }),
+        http.get('https://api.example.com/products', () =>
+          HttpResponse.json({ items: [{ id: 'p1', name: 'Example', price: 42 }] })
         ),
       ],
     };
     \`\`\`
 
-    ${getMswPreviewExample(projectInfo)}
+    ### Step 5 — Write up to 10 story files (in one batch)
 
-    \`\`\`ts
-    // ${configDir}/main.ts
-    import type { StorybookConfig } from "${typeImport}";
+    The deliverable for this step is **two things, both required**:
 
-    const config: StorybookConfig = {
-      staticDirs: ["../public"],
-    };
+    1. Up to 10 colocated \`*.stories.${tsx}\` files for meaningful targets in the codebase.
+    2. **Exactly one \`CssCheck\` story** added to one of those files (spec below). This is part of Step 5; the step is not done without it.
 
-    export default config;
-    \`\`\`
+    **Step 5a — pick targets and write the files.** Pick ~10 meaningful targets from the real codebase (low-level reusable → page components). Skip subcomponents, hooks, contexts, helpers, and \`App\` itself when real page components exist.
 
-    Keep these mocks global.
-    Do not put fetch mocks in individual stories.
-    Only add handlers for requests that the shared preview setup or the stories actually use.
-    Do not add catch-all handlers that can hide unrelated failures.
-    If the defaults are not enough, improve the shared default setup instead.
-    Seed browser state when needed, but do not mock \`window\`, \`document\`, \`navigator\`, observers, or similar runtime APIs.
-    The only exception is \`mockdate\` when date-based rendering exists.
+    Each story file: ~3 exports for typical components, up to ~10 when warranted by real usage. Copy JSX patterns from real pages/routes/tests.
 
-    ### Step 5: Write stories
-
-    Try to find around 10 good candidate components for story files.
-    Write colocated stories for top-level components, from low-level reusable components up to page components.
-    Write up to 10 story files, or fewer only if the codebase clearly has fewer meaningful targets.
-
-    The stories should use JSX copied from real usage patterns in:
-
-    - pages
-    - app shells
-    - routes
-    - tests
-    - existing feature code
-
-    As a rule of thumb, each story file should have around 3 story exports when the component or page has enough meaningful states.
-    It can have more when the real usage supports it, up to 10 story exports in one file.
-
-    Always show all imports explicitly in story and preview files.
-    Do not rely on omitted or implied imports in examples or generated code.
-
-    #### Story tags
-
-    Every story meta must include the \`ai-generated\` tag to identify AI-created stories:
+    **Tag every new story file with \`['ai-generated', 'needs-work']\` from the start.** You will remove \`'needs-work'\` only after vitest confirms the file passes. This way, anything not yet verified — including stories you ran out of time to fix — stays correctly marked.
 
     ${getStoryExample(projectInfo)}
 
-    If a story could not be fully fixed after the self-healing loop (the test still fails
-    or the rendering is incomplete), add the \`needs-work\` tag alongside \`ai-generated\`:
+    Story rules:
 
-    ${getNeedsWorkTagExample(projectInfo)}
+    - Start every meta with \`tags: ['ai-generated', 'needs-work']\`.
+    - Show all imports explicitly.
+    - Don't add a custom \`title\`.
+    - Don't build large story-specific harnesses — fix preview instead.
+    - Don't create new app components.
 
-    Keep app mocking and runtime setup in preview, not in the stories.
-    Do not build large story-specific harnesses.
-    Do not write story files for subcomponents, hooks, contexts, or helpers.
-    Do not create new application components.
-    Do not add a custom \`title\`.
-    Do not stop after only a few easy targets if the codebase has more meaningful components or pages available.
+    **Step 5b — add the single \`CssCheck\` story.** Before you finish Step 5, pick **one** visually distinctive component from the files you just wrote and add a \`CssCheck\` export to that file. Exactly **one** \`CssCheck\` across the whole project — not one per file. Step 5 is not complete until this exists.
 
-    ### Step 6: Write a play function for every story
+    Why it's mandatory: \`toBeVisible\` passes on an unstyled component. A concrete \`getComputedStyle\` value is the only proof that the shared preview actually loaded the app's CSS — without it, you have no idea whether your stories are rendering correctly.
 
-    Every named story export must have a \`play\` function.
-    The \`play\` function is not optional, even for simple stories.
+    How: read a real styling value from the component's source (e.g. a hex color in styled-components, a Tailwind class like \`bg-blue-600\`, a CSS variable from the theme), and assert the resolved \`getComputedStyle\` value:
 
-    The purpose of the \`play\` function is to prove that the story actually works in the copied Storybook environment:
-
-    - the story renders something real and non-empty
-    - the decorators provide the needed context
-    - the CSS is applied well enough for the intended state to be visible
-    - the MSW mocks or seeded browser state are actually being used
-    - important interactions, async loading states, and portals behave correctly
-
-    Use \`play\` functions to verify behavior, not just to click around.
-    A story without assertions is incomplete.
-
-    Use tools from \`storybook/test\` such as:
-
-    - \`expect\`
-    - \`waitFor\`
-
-    Prefer \`canvas\` and \`userEvent\` from the \`play\` context.
-    Do not destructure \`canvasElement\` just to create \`const canvas = within(canvasElement)\`.
-    Do not import \`userEvent\` from \`storybook/test\`; use \`userEvent\` from the \`play\` context instead.
-    Only use \`canvasElement.ownerDocument\` when you need to query outside the canvas, such as for portals.
-
-    Example:
-
-    \`\`\`tsx
-    import type { StoryObj } from "${typeImport}";
-
-    export const FilledForm: Story = {
-      play: async ({ canvas, userEvent }) => {
-        const emailInput = canvas.getByLabelText("email", {
-          selector: "input",
-        });
-
-        await userEvent.type(emailInput, "example-email@email.com", {
-          delay: 100,
-        });
-
-        const passwordInput = canvas.getByLabelText("password", {
-          selector: "input",
-        });
-
-        await userEvent.type(passwordInput, "ExamplePassword", {
-          delay: 100,
-        });
-
-        const submitButton = canvas.getByRole("button");
-        await userEvent.click(submitButton);
+    \`\`\`${tsx}
+    export const CssCheck: Story = {
+      args: { children: 'Submit' },
+      play: async ({ canvas }) => {
+        const button = canvas.getByRole('button', { name: /submit/i });
+        // PrimaryButton uses bg-blue-600 — fails if Tailwind / global CSS did not load.
+        await expect(getComputedStyle(button).backgroundColor).toBe('rgb(37, 99, 235)');
       },
     };
     \`\`\`
 
-    The assertions should match the real pattern you copied:
+    ### Step 6 — Add \`play\` functions only where they prove something non-trivial
 
-    - for provider-backed stories, assert the provider-dependent UI appears correctly
-    - for mocked-data stories, wait for the mocked data to appear and assert on it
-    - for CSS-sensitive states, assert on visibility, text layout, class-driven states, or meaningful computed styles
-    - for routing or navigation stories, assert the routed state or navigation outcome
-    - for portal stories, query from \`canvasElement.ownerDocument\` when the UI renders outside the canvas
+    **Do not put a \`play\` on every story.** A \`play\` is worth writing only when it asserts something the rendered output alone doesn't already prove. Prefer one good \`play\` per file over five redundant ones.
 
-    Examples of useful checks:
+    Write a \`play\` when it can verify:
 
-    - a themed button has the expected label and is visibly enabled or disabled
-    - a modal opened through a decorator or provider is visible in the portal root
-    - mocked API data appears in the page instead of a loading spinner forever
-    - a selected tab actually shows the selected panel
-    - a toast, alert, or badge has the expected accessible text and visual state
-    - a CSS class or computed style confirms the real state that matters
+    - an **interaction** (form fill + submit, click → menu opens, tab change reveals panel)
+    - **async data** actually arrived from MSW (waiting for mocked content to replace a spinner)
+    - a **portal** rendered into the right root (query via \`canvasElement.ownerDocument\`)
+    - a **CSS-driven state** that matters semantically (e.g. theme color, disabled styling, layout that confirms the global stylesheet loaded)
+    - **accessibility** that the component is responsible for (correct role/label exposure)
 
-    ### Step 7: Cover the patterns you found
+    **Skip \`play\` entirely** when a story is just a static variant of the same component (different \`args\`, no new behavior). Repeating \`getByRole(...).toBeVisible()\` across \`Clear\`, \`Large\`, \`WithIcon\` etc. is redundant — the render itself already fails the test if the component throws or doesn't mount.
 
-    Write stories for the real patterns in the codebase, for example:
+    **Smoke plays must prove something the render alone doesn't.** A play that does only \`await expect(canvas.getByRole('button')).toBeVisible()\` adds nothing — the render already failed if the button didn't mount. Acceptable smoke plays assert one of:
 
-    - a low-level reusable component in real JSX usage
-    - a provider-backed component
-    - a browser-state-backed component
-    - a fetched-data component
-    - a real page component
+    - an **aria attribute reflecting state** (\`aria-expanded\`, \`aria-disabled\`, \`aria-checked\`, \`aria-current\`)
+    - a **prop value rendered as text or attribute** (e.g. \`args.label\` appears in the DOM, \`href\` matches \`args.to\`)
+    - **async content arriving** (\`findBy*\`, \`waitFor\` — proves the loader/MSW handler actually resolved)
+    - a **portal mounting in the right root** (queried via \`canvasElement.ownerDocument.body\`)
 
-    Use \`App.tsx\` to inspect the real provider tree and usage patterns, but do not make a story for \`App\` when the codebase has actual page components.
+    If none of those apply, skip the \`play\` and rely on the render itself.
 
-    Example page story:
+    Concretely, in a \`Button.stories.${tsx}\` with \`Primary\`, \`Clear\`, \`Large\`, \`WithIcon\`:
 
-    ${getPageStoryExample(projectInfo)}
+    - \`Primary\` — keep one smoke \`play\` (one is enough for the file).
+    - \`Clear\`, \`Large\`, \`WithIcon\` — **no \`play\`**. They're variant-only stories.
 
-    ### Step 8: Verify both rendering and types
+    (The single \`CssCheck\` story for the whole project was added in Step 5 — don't add another one here.)
 
-    As you work, verify the stories with Vitest:
+    Imports & play context — get this right or vitest will fail in subtle ways:
+
+    - \`expect\` and \`waitFor\` come from \`'storybook/test'\` — import those.
+    - \`canvas\`, \`userEvent\`, and \`canvasElement\` come from the **play arguments**: \`async ({ canvas, userEvent, canvasElement }) => { ... }\`. **Do not** \`import { userEvent } from 'storybook/test'\` and **do not** write \`const canvas = within(canvasElement)\` — both are already provided.
+    - For **portal queries only**, query via \`canvasElement.ownerDocument.body\`. You may import \`within\` from \`'storybook/test'\` for that case (e.g. \`within(canvasElement.ownerDocument.body).findByTestId(...)\`). Don't use \`within\` for anything else.
+
+    ${getInteractionPlayExample(projectInfo)}
+
+    ### Step 7 — Verify in one batch, then iterate only on failures
+
+    **Read this rule once before running anything:** the first vitest invocation must run **all** the new stories together. No single-file runs before the batch.
 
     \`\`\`bash
-    npx vitest --project storybook <path-to-story-file>
+    npx vitest --project storybook run
     \`\`\`
 
-    Also verify types so you catch missing required props, broken imports, and preview typing issues. Run the same TypeScript command the project itself uses.
+    Then run the project's TypeScript check (use the script from \`package.json\` — typically \`tsc --noEmit\` or \`${packageManager ?? '<pm>'} run typecheck\`). Read the raw output once; don't pipe it through repeated \`grep\`/\`head\` invocations to slice it.
 
-    \`\`\`bash
-    <project-specific-typescript-command>
-    \`\`\`
+    For each failure:
 
-    After verification passes, review every changed file and remove anything that is not needed for the final solution, especially debug fixes, overly broad mocks, unnecessary dependencies, and eval artifacts.
+    1. Read the error.
+    2. If multiple stories share the failure, fix the shared preview setup, not the stories.
+    3. Re-run vitest **only for the affected file(s)**: \`npx vitest --project storybook run path/to/Foo.stories.${tsx}\`.
+    4. Repeat until the file passes, then move on. Cap retries at ~2 per file — if it still fails, leave \`'needs-work'\` and move on.
 
-    Keep iterating until:
+    **After a file passes**, edit its meta and remove \`'needs-work'\` so its tags become \`['ai-generated']\`. Files you couldn't fix keep \`['ai-generated', 'needs-work']\` — move on, don't loop forever.
 
-    - every story you wrote passes
-    - every story you wrote has a meaningful passing \`play\` function
-    - the changed stories and preview setup pass the project's real TypeScript check
-    - the rendered output looks sensible
-    - the default global mocked environment is strong enough that stories do not need manual fetch overrides
-    - stories no longer fail because the shared preview setup and story JSX are fixed
-    - all passing stories have \`tags: ['ai-generated']\` in their meta
-    - any stories that still need work have \`tags: ['ai-generated', 'needs-work']\` in their meta
-  `;
-}
+    ### Step 8 — Clean up
 
-function getDocsReferenceSection(projectInfo: ProjectInfo): string {
-  const docsUrl = (path: string) => getDocsMarkdownUrl(path, projectInfo);
+    Before finishing, remove debug code, broad mocks added during diagnosis, unused deps, and eval artifacts.
 
-  return dedent`
-    ### Storybook Documentation Reference
+    ## Done when
 
-    Use the following references to look up Storybook APIs, concepts, or examples:
+    - **Exactly one \`CssCheck\` story exists** somewhere in the new stories, asserting a concrete computed style value read from the component's source (added at the end of Step 5).
+    - Every story file you wrote that vitest confirmed passing has had \`'needs-work'\` stripped, leaving \`tags: ['ai-generated']\`. Anything still failing keeps \`['ai-generated', 'needs-work']\`.
+    - \`npx vitest --project storybook run\` passes for the new files.
+    - The project's TypeScript check passes for changed files.
+    - The shared preview is strong enough that stories don't need per-story fetch/provider workarounds.
 
-    - Full docs index: https://storybook.js.org/llms.txt
-    - See code snippets only with codeOnly=true param e.g. ${docsUrl('writing-stories')}&codeOnly=true
+    ## Reference (only fetch if stuck)
 
-    Key documentation pages for this task:
+    - Docs index: https://storybook.js.org/llms.txt
     - Writing stories: ${docsUrl('writing-stories')}
     - Decorators: ${docsUrl('writing-stories/decorators')}
-    - Args: ${docsUrl('writing-stories/args')}
     - Play functions: ${docsUrl('writing-stories/play-function')}
     - Vitest integration: ${docsUrl('writing-tests/vitest-plugin')}
 
-    Fetch these URLs directly when you need guidance on Storybook APIs or patterns.
+    Append \`?codeOnly=true\` to any docs URL for code-only snippets. Don't fetch unless a specific question can't be answered from this prompt.
   `;
 }
 
-function getPreviewConfigExample(projectInfo: ProjectInfo): string {
-  const configDir = projectInfo.configDir;
-  const typeImport = getTypeImportSource(projectInfo);
+function getPreviewExample(projectInfo: ProjectInfo): string {
+  const { configDir, language, framework, rendererPackage } = projectInfo;
+  const tsx = ext(language, true);
+  const typeImport = framework || rendererPackage || '@storybook/react-vite';
 
-  if (projectInfo.hasCsfFactoryPreview) {
+  if (language === 'js') {
     return dedent`
-      \`\`\`tsx
-      // ${configDir}/preview.tsx
-      import '../src/index.css'; // import global styles
+      \`\`\`${tsx}
+      // ${configDir}/preview.${tsx}
+      import '../src/index.css';
       import MockDate from 'mockdate';
-
-      import { definePreview } from 'storybook/preview';
+      import { initialize, mswLoader } from 'msw-storybook-addon';
       import { SessionProvider } from '../src/contexts/SessionContext';
+      import { mswHandlers } from './msw-handlers';
 
-      export default definePreview({
+      initialize({ onUnhandledRequest: 'bypass' });
+
+      const preview = {
         decorators: [
           (Story) => (
             <SessionProvider>
@@ -455,23 +326,30 @@ function getPreviewConfigExample(projectInfo: ProjectInfo): string {
             </SessionProvider>
           ),
         ],
+        loaders: [mswLoader],
+        parameters: { msw: { handlers: mswHandlers } },
         async beforeEach() {
           localStorage.setItem('theme', 'dark');
-          localStorage.setItem('sidebar:open', 'true');
           MockDate.set('2024-04-01T12:00:00Z');
         },
-      });
+      };
+
+      export default preview;
       \`\`\`
     `;
   }
 
   return dedent`
-    \`\`\`tsx
-    // ${configDir}/preview.tsx
+    \`\`\`${tsx}
+    // ${configDir}/preview.${tsx}
     import type { Preview } from '${typeImport}';
+    import '../src/index.css';
     import MockDate from 'mockdate';
-    import '../src/index.css'; // import global styles
+    import { initialize, mswLoader } from 'msw-storybook-addon';
     import { SessionProvider } from '../src/contexts/SessionContext';
+    import { mswHandlers } from './msw-handlers';
+
+    initialize({ onUnhandledRequest: 'bypass' });
 
     const preview: Preview = {
       decorators: [
@@ -481,9 +359,10 @@ function getPreviewConfigExample(projectInfo: ProjectInfo): string {
           </SessionProvider>
         ),
       ],
+      loaders: [mswLoader],
+      parameters: { msw: { handlers: mswHandlers } },
       async beforeEach() {
         localStorage.setItem('theme', 'dark');
-        localStorage.setItem('sidebar:open', 'true');
         MockDate.set('2024-04-01T12:00:00Z');
       },
     };
@@ -493,211 +372,129 @@ function getPreviewConfigExample(projectInfo: ProjectInfo): string {
   `;
 }
 
-function getMockDateExample(projectInfo: ProjectInfo): string {
-  const typeImport = getTypeImportSource(projectInfo);
-
-  if (projectInfo.hasCsfFactoryPreview) {
-    return dedent`
-      \`\`\`tsx
-      import MockDate from 'mockdate';
-      import { definePreview } from 'storybook/preview';
-
-      export default definePreview({
-        async beforeEach() {
-          MockDate.set('2024-04-01T12:00:00Z');
-        },
-      });
-      \`\`\`
-    `;
-  }
+function getPortalDecoratorExample(projectInfo: ProjectInfo): string {
+  const { language } = projectInfo;
+  const tsx = ext(language, true);
 
   return dedent`
-    \`\`\`tsx
-    import type { Preview } from '${typeImport}';
-    import MockDate from 'mockdate';
-
-    const preview: Preview = {
-      async beforeEach() {
-        MockDate.set('2024-04-01T12:00:00Z');
-      },
-    };
-
-    export default preview;
+    \`\`\`${tsx}
+    // Add this entry to the \`decorators\` array of your preview config:
+    (Story) => {
+      for (const id of ['modal-root', 'drawer-root', 'toast-root']) {
+        if (!document.getElementById(id)) {
+          const el = document.createElement('div');
+          el.id = id;
+          document.body.appendChild(el);
+        }
+      }
+      return <Story />;
+    }
     \`\`\`
   `;
 }
 
-function getMswPreviewExample(projectInfo: ProjectInfo): string {
-  const configDir = projectInfo.configDir;
-  const typeImport = getTypeImportSource(projectInfo);
+function getMainConfigExample(projectInfo: ProjectInfo): string {
+  const { configDir, framework, rendererPackage, language } = projectInfo;
+  const ts = ext(language, false);
+  const typeImport = framework || rendererPackage || '@storybook/react';
 
-  if (projectInfo.hasCsfFactoryPreview) {
+  if (language === 'js') {
     return dedent`
-      \`\`\`tsx
-      // ${configDir}/preview.tsx
-      import { definePreview } from 'storybook/preview';
-      import { initialize, mswLoader } from 'msw-storybook-addon';
-      import { mswHandlers } from './msw-handlers';
-
-      initialize({
-        onUnhandledRequest: 'bypass',
-      });
-
-      export default definePreview({
-        loaders: [mswLoader],
-        parameters: {
-          msw: {
-            handlers: mswHandlers,
-          },
-        },
-      });
+      \`\`\`js
+      // ${configDir}/main.js
+      const config = { staticDirs: ['../public'] };
+      export default config;
       \`\`\`
     `;
   }
 
   return dedent`
-    \`\`\`tsx
-    // ${configDir}/preview.tsx
-    import type { Preview } from '${typeImport}';
-    import { initialize, mswLoader } from 'msw-storybook-addon';
-    import { mswHandlers } from './msw-handlers';
+    \`\`\`${ts}
+    // ${configDir}/main.${ts}
+    import type { StorybookConfig } from '${typeImport}';
 
-    initialize({
-      onUnhandledRequest: 'bypass',
-    });
-
-    const preview: Preview = {
-      loaders: [mswLoader],
-      parameters: {
-        msw: {
-          handlers: mswHandlers,
-        },
-      },
-    };
-
-    export default preview;
+    const config: StorybookConfig = { staticDirs: ['../public'] };
+    export default config;
     \`\`\`
   `;
 }
 
 function getStoryExample(projectInfo: ProjectInfo): string {
-  if (projectInfo.hasCsfFactoryPreview) {
+  const { language, framework, rendererPackage } = projectInfo;
+  const tsx = ext(language, true);
+  const typeImport = framework || rendererPackage || '@storybook/react-vite';
+
+  if (language === 'js') {
     return dedent`
-      \`\`\`tsx
-      import preview from '#.storybook/preview';
+      \`\`\`${tsx}
       import { expect } from 'storybook/test';
-      import { SomeComponent } from './SomeComponent';
+      import { Button } from './Button';
 
-      const meta = preview.meta({
-        component: SomeComponent,
-        tags: ['ai-generated'],
-      });
+      const meta = {
+        component: Button,
+        tags: ['ai-generated', 'needs-work'], // strip 'needs-work' once vitest passes
+      };
 
-      export const Default = meta.story({
-        render: () => <SomeComponent variant="primary" disabled={false} />,
+      export default meta;
+
+      // Smoke check — one is enough per file
+      export const Primary = {
+        args: { children: 'Order now' },
         play: async ({ canvas }) => {
-          await expect(canvas.getByRole('button')).toBeVisible();
+          await expect(canvas.getByRole('button', { name: /order now/i })).toBeVisible();
         },
-      });
+      };
+
+      // Variant-only stories: no play needed
+      export const Clear = { args: { children: 'Cancel', clear: true } };
+      export const Large = { args: { children: 'Checkout', large: true } };
+      export const WithIcon = { args: { icon: 'cart', 'aria-label': 'food cart' } };
       \`\`\`
     `;
   }
 
-  const typeImport = getTypeImportSource(projectInfo);
-
   return dedent`
-    \`\`\`tsx
+    \`\`\`${tsx}
     import type { Meta, StoryObj } from '${typeImport}';
     import { expect } from 'storybook/test';
-    import { SomeComponent } from './SomeComponent';
+    import { Button } from './Button';
 
     const meta = {
-      component: SomeComponent,
-      tags: ['ai-generated'],
-    } satisfies Meta<typeof SomeComponent>;
+      component: Button,
+      tags: ['ai-generated', 'needs-work'], // strip 'needs-work' once vitest passes
+    } satisfies Meta<typeof Button>;
 
     export default meta;
     type Story = StoryObj<typeof meta>;
 
-    export const Default: Story = {
-      render: () => <SomeComponent variant="primary" disabled={false} />,
+    // Smoke check — one is enough per file
+    export const Primary: Story = {
+      args: { children: 'Order now' },
       play: async ({ canvas }) => {
-        await expect(canvas.getByRole('button')).toBeVisible();
+        await expect(canvas.getByRole('button', { name: /order now/i })).toBeVisible();
       },
     };
+
+    // Variant-only stories: no play needed
+    export const Clear: Story = { args: { children: 'Cancel', clear: true } };
+    export const Large: Story = { args: { children: 'Checkout', large: true } };
+    export const WithIcon: Story = { args: { icon: 'cart', 'aria-label': 'food cart' } };
     \`\`\`
   `;
 }
 
-function getNeedsWorkTagExample(projectInfo: ProjectInfo): string {
-  if (projectInfo.hasCsfFactoryPreview) {
-    return dedent`
-      \`\`\`ts
-      const meta = preview.meta({
-        component: SomeComponent,
-        tags: ['ai-generated', 'needs-work'],
-      });
-      \`\`\`
-    `;
-  }
+function getInteractionPlayExample(projectInfo: ProjectInfo): string {
+  const { language } = projectInfo;
+  const tsx = ext(language, true);
+  const typeAnnotation = language === 'ts' ? ': Story' : '';
 
   return dedent`
-    \`\`\`ts
-    const meta = {
-      component: SomeComponent,
-      tags: ['ai-generated', 'needs-work'],
-    } satisfies Meta<typeof SomeComponent>;
-    \`\`\`
-  `;
-}
-
-function getPageStoryExample(projectInfo: ProjectInfo): string {
-  if (projectInfo.hasCsfFactoryPreview) {
-    return dedent`
-      \`\`\`tsx
-      import preview from '#.storybook/preview';
-      import { expect } from 'storybook/test';
-      import { ProductPage } from './ProductPage';
-
-      const meta = preview.meta({
-        component: ProductPage,
-        tags: ['ai-generated'],
-      });
-
-      export const Default = meta.story({
-        render: () => <ProductPage />,
-        play: async ({ canvas }) => {
-          await expect(
-            canvas.getByRole('heading', { name: /products/i }),
-          ).toBeVisible();
-        },
-      });
-      \`\`\`
-    `;
-  }
-
-  const typeImport = getTypeImportSource(projectInfo);
-
-  return dedent`
-    \`\`\`tsx
-    import type { Meta, StoryObj } from '${typeImport}';
-    import { expect } from 'storybook/test';
-    import { ProductPage } from './ProductPage';
-
-    const meta = {
-      component: ProductPage,
-      tags: ['ai-generated'],
-    } satisfies Meta<typeof ProductPage>;
-
-    export default meta;
-    type Story = StoryObj<typeof meta>;
-
-    export const Default: Story = {
-      render: () => <ProductPage />,
-      play: async ({ canvas }) => {
-        await expect(
-          canvas.getByRole('heading', { name: /products/i }),
-        ).toBeVisible();
+    \`\`\`${tsx}
+    export const FilledForm${typeAnnotation} = {
+      play: async ({ canvas, userEvent }) => {
+        await userEvent.type(canvas.getByLabelText('email'), 'a@b.com', { delay: 50 });
+        await userEvent.click(canvas.getByRole('button', { name: /submit/i }));
+        await expect(await canvas.findByText(/welcome/i)).toBeVisible();
       },
     };
     \`\`\`
@@ -705,22 +502,29 @@ function getPageStoryExample(projectInfo: ProjectInfo): string {
 }
 
 function getProjectOverview(projectInfo: ProjectInfo): string {
-  return dedent`
-    ## Project Info
+  const rows: Array<[string, string]> = [
+    ['Version', projectInfo.storybookVersion || 'unknown'],
+    ['Renderer', projectInfo.rendererPackage || 'unknown'],
+    ['Framework', projectInfo.framework || 'unknown'],
+    ['Builder', projectInfo.builderPackage || 'unknown'],
+    ['Config Dir', `\`${projectInfo.configDir}\``],
+    ['Language', projectInfo.language === 'ts' ? 'TypeScript' : 'JavaScript'],
+  ];
 
-    | Property | Value |
-    |----------|-------|
-    | Version | ${projectInfo.storybookVersion || 'unknown'} |
-    | Renderer | ${projectInfo.rendererPackage || 'unknown'} |
-    | Framework | ${projectInfo.framework || 'unknown'} |
-    | Builder | ${projectInfo.builderPackage || 'unknown'} |
-    | Config Dir | \`${projectInfo.configDir}\` |
-    | CSF Format | ${projectInfo.hasCsfFactoryPreview ? 'CSF Factory' : 'CSF3'} |
-    | Addons | ${projectInfo.addons.length > 0 ? projectInfo.addons.join(', ') : 'none'} |
-  `;
+  if (projectInfo.packageManager) {
+    rows.push(['Package Manager', projectInfo.packageManager]);
+  }
+
+  rows.push(['Addons', projectInfo.addons.length > 0 ? projectInfo.addons.join(', ') : 'none']);
+
+  const tableRows = rows.map(([key, value]) => `| ${key} | ${value} |`).join('\n');
+
+  return ['## Project Info', '', '| Property | Value |', '|----------|-------|', tableRows].join(
+    '\n'
+  );
 }
 
-export function generateMarkdownOutput(projectInfo: ProjectInfo): {
+export function generateMarkdownOutput(projectInfo?: ProjectInfo): {
   markdown: string;
 } {
   const { prompts: aiPrompts } = getPrompts(projectInfo);
@@ -731,7 +535,9 @@ export function generateMarkdownOutput(projectInfo: ProjectInfo): {
     # Storybook Setup
   `);
 
-  sections.push(getProjectOverview(projectInfo));
+  if (projectInfo) {
+    sections.push(getProjectOverview(projectInfo));
+  }
 
   for (const aiPrompt of aiPrompts) {
     sections.push(aiPrompt.instructions);
